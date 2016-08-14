@@ -487,21 +487,28 @@ evaluate_subscription_options(MetricId, undefined, DefaultTags, DefaultSeriesNam
   evaluate_subscription_options(MetricId, [], DefaultTags, DefaultSeriesName, DefaultFormatting);
 evaluate_subscription_options(MetricId, Options, DefaultTags, DefaultSeriesName, DefaultFormatting) ->
     TagOpts = proplists:get_value(tags, Options, []),
-    TagsResult = evaluate_subscription_tags(MetricId, TagOpts),
+    TagsResult = evaluate_subscription_tags(MetricId, TagOpts, DefaultTags),
     FormattingOpts = proplists:get_value(formatting, Options, DefaultFormatting),
     FormattingResult = evaluate_subscription_formatting(TagsResult, FormattingOpts),
     SeriesName = proplists:get_value(series_name, Options, DefaultSeriesName),
     {FinalMetricId, NewTags} = evaluate_subscription_series_name(FormattingResult, SeriesName),
     TagMap = maps:from_list(NewTags),
-    FinalTags = merge_tags(DefaultTags, TagMap),
-    {FinalMetricId, FinalTags}.
+    {FinalMetricId, TagMap}.
 
 -spec evaluate_subscription_tags(list(), [{atom(), value()}]) -> 
     {list(), [{atom(), value()}], [integer()]}.
 evaluate_subscription_tags(MetricId, TagOpts) ->
     evaluate_subscription_tags(MetricId, TagOpts, [], []).
 
--spec evaluate_subscription_tags(list(), [{atom(), value()}], [{atom(), value()}], [integer()]) -> 
+-spec evaluate_subscription_tags(list(), [{atom(), value()}], map()) ->
+    {list(), [{atom(), value()}], [integer()]}.
+evaluate_subscription_tags(MetricId, TagOpts, DefaultTags) ->
+    TagOptsMap = maps:from_list(TagOpts),
+    MergedTagsMap = merge_tags(DefaultTags, TagOptsMap),
+    MergedTagsOpts = maps:to_list(MergedTagsMap),
+    evaluate_subscription_tags(MetricId, MergedTagsOpts).
+
+-spec evaluate_subscription_tags(list(), [{atom(), value()}], [{atom(), value()}], [integer()]) ->
     {list(), [{atom(), value()}], [integer()]}.
 evaluate_subscription_tags(MetricId, [], TagAcc, PosAcc) ->
     {MetricId, TagAcc, PosAcc};
