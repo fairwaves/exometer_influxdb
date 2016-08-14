@@ -409,7 +409,7 @@ name(Metric) -> iolist_to_binary(metric_to_string(Metric)).
 key(K) when is_integer(K) -> key(integer_to_binary(K));
 key(K) when is_list(K) -> key(list_to_binary(K));
 key(K) when is_atom(K) -> key(atom_to_binary(K, utf8));
-key(K) ->
+key(K) when is_binary(K) ->
     binary:replace(K, [<<" ">>, <<$,>>, <<$=>>], <<$\\>>,
                    [global, {insert_replaced, 1}]).
 
