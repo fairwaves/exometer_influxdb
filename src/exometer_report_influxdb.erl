@@ -8,6 +8,7 @@
          exometer_cast/2,
          exometer_call/3,
          exometer_report/5,
+         exometer_report_bulk/3,
          exometer_subscribe/5,
          exometer_unsubscribe/4,
          exometer_newentry/2,
@@ -118,21 +119,32 @@ exometer_init(Opts) ->
                       exometer_report:extra(),
                       value(),
                       state()) -> callback_result().
-exometer_report(_Metric, _DataPoint, _Extra, _Value,
-                #state{connection = undefined} = State) ->
-    ?info("InfluxDB reporter isn't connected and will reconnect."),
-    {ok, State};
-exometer_report(Metric, DataPoint, _Extra, Value,
-                #state{metrics = Metrics} = State) ->
-    case maps:get(Metric, Metrics, not_found) of
-        {MetricName, Tags} ->
-            maybe_send(Metric, MetricName, Tags,
-                       maps:from_list([{DataPoint, Value}]), State);
-        Error ->
-            ?warning("InfluxDB reporter got trouble when looking ~p metric's tag: ~p",
-                     [Metric, Error]),
-            Error
-    end.
+exometer_report(Metric, DataPoint, Extra, Value, State) ->
+    exometer_report_bulk([{Metric, [{DataPoint, Value}]}], Extra, State).
+
+-spec exometer_report_bulk([{exometer_report:metric(),
+                             [{exometer_report:datapoint(), value()}] }],
+                           exometer_report:extra(),
+                           state()) -> callback_result().
+exometer_report_bulk(_MetricList, _Extra,
+                     #state{connection = undefined} = State) ->
+   ?info("InfluxDB reporter isn't connected and will reconnect."),
+   {ok, State};
+exometer_report_bulk([{Metric, DataPointList}|Rest], Extra,
+                     #state{metrics = Metrics} = State) ->
+    {ok, NewState} =
+        case maps:get(Metric, Metrics, not_found) of
+            {MetricName, Tags} ->
+                maybe_send(Metric, MetricName, Tags,
+                           maps:from_list(DataPointList), State);
+            _ ->
+                ?warning("InfluxDB reporter received unknown metric ~p. Ignoring it.", [Metric]),
+                {ok, State}
+        end,
+    exometer_report_bulk(Rest, Extra, NewState);
+exometer_report_bulk([], _Extra, State) ->
+    {ok, State}.
+
 
 -spec exometer_subscribe(exometer_report:metric(),
                          exometer_report:datapoint(),
