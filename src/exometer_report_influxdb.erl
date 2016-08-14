@@ -64,7 +64,10 @@
                 metrics :: map(),
                 autosubscribe :: boolean(),
                 subscriptions_module :: module(),
-                connection :: gen_udp:socket() | reference()}).
+                connection :: gen_udp:socket() | reference(),
+                try_subscribe :: boolean() % used to prevent potential infinite
+                                           % loop in maybe_subscribe()
+               }).
 -type state() :: #state{}.
 
 
@@ -102,7 +105,8 @@ exometer_init(Opts) ->
                     batch_window_size = BatchWinSize,
                     autosubscribe = Autosubscribe,
                     subscriptions_module = SubscriptionsMod,
-                    metrics = maps:new()},
+                    metrics = maps:new(),
+                    try_subscribe = true},
     case connect(Protocol, Host, Port, Username, Password) of
         {ok, Connection} ->
             ?info("InfluxDB reporter connecting success: ~p", [Opts]),
@@ -122,16 +126,17 @@ exometer_report(_Metric, _DataPoint, _Extra, _Value,
                 #state{connection = undefined} = State) ->
     ?info("InfluxDB reporter isn't connected and will reconnect."),
     {ok, State};
-exometer_report(Metric, DataPoint, _Extra, Value,
+exometer_report(Metric, DataPoint, Extra, Value,
                 #state{metrics = Metrics} = State) ->
     case maps:get(Metric, Metrics, not_found) of
         {MetricName, Tags} ->
             maybe_send(Metric, MetricName, Tags,
                        maps:from_list([{DataPoint, Value}]), State);
-        Error ->
-            ?warning("InfluxDB reporter got trouble when looking ~p metric's tag: ~p",
-                     [Metric, Error]),
-            Error
+        _ ->
+            % Exometer 1.4.0 doesn't subscribe us to predefined metrics
+            % it's a bug of Exometer and this is a workaround for it. We try to
+            % automatically register this metric in our internal state.
+            maybe_subscribe(Metric, DataPoint, Extra, Value, State)
     end.
 
 -spec exometer_subscribe(exometer_report:metric(),
@@ -312,6 +317,21 @@ send(Packet, #state{protocol = udp, connection = Socket,
             reconnect(State)
     end;
 send(_, #state{protocol = Protocol}) -> {error, {Protocol, not_supported}}.
+
+-spec maybe_subscribe(exometer_report:metric(),
+                      exometer_report:datapoint(),
+                      exometer_report:extra(),
+                      value(),
+                      state()) -> callback_result().
+maybe_subscribe(Metric, DataPoint, Extra, Value, #state{try_subscribe=true} = State) ->
+    ?info("InfluxDB reporter received unknown metric ~p. Subscribing to it.", [Metric]),
+    {ok, NewState} = exometer_subscribe(Metric, DataPoint, undefined, Extra, State),
+    {ok, NewState2} =
+        exometer_report(Metric, DataPoint, Extra, Value, NewState#state{try_subscribe=false}),
+    {ok, NewState2#state{try_subscribe=true}};
+maybe_subscribe(_Metric, _DataPoint, _Extra, _Value, #state{try_subscribe=false} = State) ->
+    ?warning("InfluxDB reporter received unknown metric ~p and failed subscribing to it.", [_Metric]),
+    {ok, State#state{try_subscribe=true}}.
 
 -spec merge_tags(list() | map(), list() | map()) -> map().
 merge_tags(Tags, AdditionalTags) when is_list(Tags) ->
