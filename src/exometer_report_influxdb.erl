@@ -41,7 +41,7 @@
 
 -define(HTTP(Proto), (Proto =:= http orelse Proto =:= https)).
 
--include("log.hrl").
+-include_lib("hut/include/hut.hrl").
 
 -type options() :: [{atom(), any()}].
 -type value() :: any().
@@ -106,10 +106,10 @@ exometer_init(Opts) ->
                     metrics = maps:new()},
     case connect(Protocol, Host, Port, Username, Password) of
         {ok, Connection} ->
-            ?info("InfluxDB reporter connecting success: ~p", [Opts]),
+            ?log(info, "InfluxDB reporter connecting success: ~p", [Opts]),
             {ok, State#state{connection = Connection}};
         Error ->
-            ?error("InfluxDB reporter connecting error: ~p", [Error]),
+            ?log(error, "InfluxDB reporter connecting error: ~p", [Error]),
             prepare_reconnect(),
             {ok, State}
     end.
@@ -128,7 +128,7 @@ exometer_report(Metric, DataPoint, Extra, Value, State) ->
                            state()) -> callback_result().
 exometer_report_bulk(_MetricList, _Extra,
                      #state{connection = undefined} = State) ->
-   ?info("InfluxDB reporter isn't connected and will reconnect."),
+   ?log(info, "InfluxDB reporter isn't connected and will reconnect."),
    {ok, State};
 exometer_report_bulk([{Metric, DataPointList}|Rest], Extra,
                      #state{metrics = Metrics} = State) ->
@@ -138,7 +138,7 @@ exometer_report_bulk([{Metric, DataPointList}|Rest], Extra,
                 maybe_send(Metric, MetricName, Tags,
                            maps:from_list(DataPointList), State);
             _ ->
-                ?warning("InfluxDB reporter received unknown metric ~p. Ignoring it.", [Metric]),
+                ?log(warning, "InfluxDB reporter received unknown metric ~p. Ignoring it.", [Metric]),
                 {ok, State}
         end,
     exometer_report_bulk(Rest, Extra, NewState);
@@ -215,7 +215,7 @@ exometer_setopts(_Metric, _Options, _Status, State) ->
 
 -spec exometer_terminate(any(), state()) -> any().
 exometer_terminate(Reason, _) ->
-    ?info("InfluxDB reporter is terminating with reason: ~p~n", [Reason]),
+    ?log(info, "InfluxDB reporter is terminating with reason: ~p~n", [Reason]),
     ignore.
 
 
@@ -245,11 +245,11 @@ reconnect(#state{protocol = Protocol, host = Host, port = Port,
                  username = Username, password = Password} = State) ->
     case connect(Protocol, Host, Port, Username, Password) of
         {ok, Connection} ->
-            ?info("InfluxDB reporter reconnecting success: ~p",
+            ?log(info, "InfluxDB reporter reconnecting success: ~p",
                   [{Protocol, Host, Port, Username, Password}]),
             {ok, State#state{connection = Connection}};
         Error ->
-            ?error("InfluxDB reporter reconnecting error: ~p", [Error]),
+            ?log(error, "InfluxDB reporter reconnecting error: ~p", [Error]),
             prepare_reconnect(),
             {ok, State#state{connection = undefined}}
     end.
@@ -308,11 +308,11 @@ send(Packet, #state{protocol = http, connection= Connection,
             {ok, State};
         {ok, Status, _Headers, Ref} ->
             {ok, Body} = hackney:body(Ref),
-            ?warning("InfluxDB reporter got unexpected response with code ~p"
+            ?log(warning, "InfluxDB reporter got unexpected response with code ~p"
                      " and body: ~p. Reconnecting ...", [Status, Body]),
             reconnect(State);
         {error, _} = Error ->
-            ?error("InfluxDB reporter HTTP sending error: ~p", [Error]),
+            ?log(error, "InfluxDB reporter HTTP sending error: ~p", [Error]),
             reconnect(State)
     end;
 send(Packet, #state{protocol = udp, connection = Socket,
@@ -320,7 +320,7 @@ send(Packet, #state{protocol = udp, connection = Socket,
     case gen_udp:send(Socket, Host, Port, Packet) of
         ok -> {ok, State};
         Error ->
-            ?error("InfluxDB reporter UDP sending error: ~p", [Error]),
+            ?log(error, "InfluxDB reporter UDP sending error: ~p", [Error]),
             reconnect(State)
     end;
 send(_, #state{protocol = Protocol}) -> {error, {Protocol, not_supported}}.
