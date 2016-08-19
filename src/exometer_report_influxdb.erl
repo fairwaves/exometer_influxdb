@@ -48,9 +48,8 @@
 -type options() :: [{atom(), any()}].
 -type value() :: any().
 -type tags() :: map().
--type metric_name() :: list().
--type measurement() :: {exometer_report:metric(), metric_name(), tags(),
-                        exometer_report:datapoints()}.
+-type metric_name() :: list(atom()).
+-type measurement() :: {metric_name(), tags(), exometer_report:datapoints()}.
 -type measurements() :: [measurement()].
 -type callback_result() :: {ok, state()} | any().
 -type precision() :: n | u | ms | s | m | h.
@@ -64,7 +63,7 @@
                 port :: inet:port_number(),  % for udp
                 timestamping :: boolean(),
                 precision :: precision(),
-                collected_metrics = #{} :: map(),
+                collected_metrics = [] :: list(),
                 batch_window_size = 0 :: integer(),
                 tags :: map(),
                 series_name :: atom(),
@@ -143,7 +142,7 @@ exometer_report_bulk([{Metric, DataPointList}|Rest], Extra,
         case maps:get(Metric, Metrics, not_found) of
             {MetricName, Tags} ->
                 MeasurementList =
-                    process_split_opt(Extra, {Metric, MetricName, Tags, DataPointList}),
+                    process_split_opt(Extra, {MetricName, Tags, DataPointList}),
                 maybe_send_list(MeasurementList, State);
             _ ->
                 ?log(warning, "InfluxDB reporter received unknown metric ~p. Ignoring it.", [Metric]),
@@ -195,11 +194,11 @@ exometer_info({exometer_influxdb, reconnect}, State) ->
 exometer_info({exometer_influxdb, send},
               #state{precision = Precision,
                      collected_metrics = CollectedMetrics} = State) ->
-    if CollectedMetrics /= #{} ->
+    if CollectedMetrics /= [] ->
         Packets = [make_packet(MetricName, Tags, Fileds, Timestamping, Precision) ++ "\n"
-                   || {_, {MetricName, Tags, Fileds, Timestamping}}
-                      <- maps:to_list(CollectedMetrics)],
-        send(Packets, State#state{collected_metrics = #{}});
+                   || {MetricName, Tags, Fileds, Timestamping}
+                      <- CollectedMetrics],
+        send(Packets, State#state{collected_metrics = []});
     true -> {ok, State}
     end;
 exometer_info(_Unknown, State) ->
@@ -274,11 +273,11 @@ process_split_opt(undefined=_Extra, Measurement) ->
     [Measurement];
 process_split_opt([]=_Extra, Measurement) ->
     [Measurement];
-process_split_opt(Extra, {Metric, MetricName, Tags, DataPointList}=Measurement) ->
+process_split_opt(Extra, {MetricName, Tags, DataPointList}=Measurement) ->
     case get_opt(split, Extra, ?DEFAULT_SPLIT_OPT) of
         true ->
             ValName = get_opt(value_name, Extra, ?DEFAULT_VALUE_NAME_OPT),
-            [ {Metric, MetricName, Tags#{key(instance)=>Instance}, [{ValName,Value}]}
+            [ {MetricName, Tags#{key(instance)=>Instance}, [{ValName,Value}]}
             || {Instance, Value} <- DataPointList];
         _ ->
             [Measurement]
@@ -286,9 +285,9 @@ process_split_opt(Extra, {Metric, MetricName, Tags, DataPointList}=Measurement) 
 
 -spec maybe_send_list(measurements(), state()) ->
     {ok, state()} | {error, term()}.
-maybe_send_list([{Metric, MetricName, Tags, DataPointList}|Rest], State) ->
+maybe_send_list([{MetricName, Tags, DataPointList}|Rest], State) ->
     DataPointMap = maps:from_list(DataPointList),
-    case maybe_send(Metric, MetricName, Tags, DataPointMap, State) of
+    case maybe_send(MetricName, Tags, DataPointMap, State) of
         {ok, State1} ->
             maybe_send_list(Rest, State1);
         {error, Term} ->
@@ -297,33 +296,19 @@ maybe_send_list([{Metric, MetricName, Tags, DataPointList}|Rest], State) ->
 maybe_send_list([], State) ->
     {ok, State}.
 
--spec maybe_send(list(), list(), map(), map(), state()) ->
+-spec maybe_send(metric_name(), tags(), map(), state()) ->
     {ok, state()} | {error, term()}.
-maybe_send(OriginMetricName, MetricName, Tags0, Fields,
+maybe_send(MetricName, Tags, Fields,
            #state{batch_window_size = BatchWinSize,
                   precision = Precision,
                   timestamping = Timestamping,
                   collected_metrics = CollectedMetrics} = State)
   when BatchWinSize > 0 ->
-    NewCollectedMetrics = case maps:get(OriginMetricName, CollectedMetrics, not_found) of
-        {MetricName, Tags, Fields1} ->
-            NewFields = maps:merge(Fields, Fields1),
-            maps:put(OriginMetricName,
-                     {MetricName, Tags, NewFields, Timestamping andalso unix_time(Precision)},
-                     CollectedMetrics);
-        {MetricName, Tags, Fields1, _OrigTimestamp} ->
-            NewFields = maps:merge(Fields, Fields1),
-            maps:put(OriginMetricName,
-                     {MetricName, Tags, NewFields, Timestamping andalso unix_time(Precision)},
-                     CollectedMetrics);
-        not_found ->
-            maps:put(OriginMetricName,
-                     {MetricName, Tags0, Fields, Timestamping andalso unix_time(Precision)},
-                     CollectedMetrics)
-    end,
-    maps:size(CollectedMetrics) == 0 andalso prepare_batch_send(BatchWinSize),
+    Timestamp = Timestamping andalso unix_time(Precision),
+    NewCollectedMetrics = [{MetricName, Tags, Fields, Timestamp}|CollectedMetrics],
+    prepare_batch_send(BatchWinSize),
     {ok, State#state{collected_metrics = NewCollectedMetrics}};
-maybe_send(_, MetricName, Tags, Fields,
+maybe_send(MetricName, Tags, Fields,
            #state{timestamping = Timestamping, precision = Precision} = State) ->
     Packet = make_packet(MetricName, Tags, Fields, Timestamping, Precision),
     send(Packet, State).
