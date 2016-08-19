@@ -33,6 +33,8 @@
 -define(DEFAULT_SERIES_NAME, undefined).
 -define(DEFAULT_FORMATTING, []).
 -define(DEFAULT_TIMESTAMP_OPT, false).
+-define(DEFAULT_SPLIT_OPT, false).
+-define(DEFAULT_VALUE_NAME_OPT, value).
 -define(DEFAULT_BATCH_WINDOW_SIZE, 0).
 -define(DEFAULT_AUTOSUBSCRIBE, false).
 -define(DEFAULT_SUBSCRIPTIONS_MOD, undefined).
@@ -45,6 +47,11 @@
 
 -type options() :: [{atom(), any()}].
 -type value() :: any().
+-type tags() :: map().
+-type metric_name() :: list().
+-type measurement() :: {exometer_report:metric(), metric_name(), tags(),
+                        exometer_report:datapoints()}.
+-type measurements() :: [measurement()].
 -type callback_result() :: {ok, state()} | any().
 -type precision() :: n | u | ms | s | m | h.
 -type protocol() :: http | udp.
@@ -135,8 +142,9 @@ exometer_report_bulk([{Metric, DataPointList}|Rest], Extra,
     {ok, NewState} =
         case maps:get(Metric, Metrics, not_found) of
             {MetricName, Tags} ->
-                maybe_send(Metric, MetricName, Tags,
-                           maps:from_list(DataPointList), State);
+                MeasurementList =
+                    process_split_opt(Extra, {Metric, MetricName, Tags, DataPointList}),
+                maybe_send_list(MeasurementList, State);
             _ ->
                 ?log(warning, "InfluxDB reporter received unknown metric ~p. Ignoring it.", [Metric]),
                 {ok, State}
@@ -184,12 +192,12 @@ exometer_cast(_Unknown, State) ->
 -spec exometer_info(any(), state()) -> callback_result().
 exometer_info({exometer_influxdb, reconnect}, State) ->
     reconnect(State);
-exometer_info({exometer_influxdb, send}, 
+exometer_info({exometer_influxdb, send},
               #state{precision = Precision,
                      collected_metrics = CollectedMetrics} = State) ->
     if CollectedMetrics /= #{} ->
         Packets = [make_packet(MetricName, Tags, Fileds, Timestamping, Precision) ++ "\n"
-                   || {_, {MetricName, Tags, Fileds, Timestamping}} 
+                   || {_, {MetricName, Tags, Fileds, Timestamping}}
                       <- maps:to_list(CollectedMetrics)],
         send(Packets, State#state{collected_metrics = #{}});
     true -> {ok, State}
@@ -198,8 +206,8 @@ exometer_info(_Unknown, State) ->
     {ok, State}.
 
 -spec exometer_newentry(exometer:entry(), state()) -> callback_result().
-exometer_newentry(#exometer_entry{name = Name, type = Type} = _Entry, 
-                  #state{autosubscribe = Autosubscribe, 
+exometer_newentry(#exometer_entry{name = Name, type = Type} = _Entry,
+                  #state{autosubscribe = Autosubscribe,
                          subscriptions_module = Module} = State) ->
     case {Autosubscribe, Module} of
         {true, Module} when is_atom(Module); Module /= undefined ->
@@ -260,10 +268,39 @@ prepare_batch_send(Time) ->
 prepare_reconnect() ->
     erlang:send_after(1000, ?MODULE, {exometer_influxdb, reconnect}).
 
+-spec process_split_opt(exometer_report:extra(),
+                        measurement()) -> {ok, measurements()}.
+process_split_opt(undefined=_Extra, Measurement) ->
+    [Measurement];
+process_split_opt([]=_Extra, Measurement) ->
+    [Measurement];
+process_split_opt(Extra, {Metric, MetricName, Tags, DataPointList}=Measurement) ->
+    case get_opt(split, Extra, ?DEFAULT_SPLIT_OPT) of
+        true ->
+            ValName = get_opt(value_name, Extra, ?DEFAULT_VALUE_NAME_OPT),
+            [ {Metric, MetricName, Tags#{key(instance)=>Instance}, [{ValName,Value}]}
+            || {Instance, Value} <- DataPointList];
+        _ ->
+            [Measurement]
+    end.
+
+-spec maybe_send_list(measurements(), state()) ->
+    {ok, state()} | {error, term()}.
+maybe_send_list([{Metric, MetricName, Tags, DataPointList}|Rest], State) ->
+    DataPointMap = maps:from_list(DataPointList),
+    case maybe_send(Metric, MetricName, Tags, DataPointMap, State) of
+        {ok, State1} ->
+            maybe_send_list(Rest, State1);
+        {error, Term} ->
+            {error, Term}
+    end;
+maybe_send_list([], State) ->
+    {ok, State}.
+
 -spec maybe_send(list(), list(), map(), map(), state()) ->
     {ok, state()} | {error, term()}.
-maybe_send(OriginMetricName, MetricName, Tags0, Fields, 
-           #state{batch_window_size = BatchWinSize, 
+maybe_send(OriginMetricName, MetricName, Tags0, Fields,
+           #state{batch_window_size = BatchWinSize,
                   precision = Precision,
                   timestamping = Timestamping,
                   collected_metrics = CollectedMetrics} = State)
@@ -271,17 +308,17 @@ maybe_send(OriginMetricName, MetricName, Tags0, Fields,
     NewCollectedMetrics = case maps:get(OriginMetricName, CollectedMetrics, not_found) of
         {MetricName, Tags, Fields1} ->
             NewFields = maps:merge(Fields, Fields1),
-            maps:put(OriginMetricName, 
-                     {MetricName, Tags, NewFields, Timestamping andalso unix_time(Precision)}, 
+            maps:put(OriginMetricName,
+                     {MetricName, Tags, NewFields, Timestamping andalso unix_time(Precision)},
                      CollectedMetrics);
         {MetricName, Tags, Fields1, _OrigTimestamp} ->
             NewFields = maps:merge(Fields, Fields1),
             maps:put(OriginMetricName,
                      {MetricName, Tags, NewFields, Timestamping andalso unix_time(Precision)},
                      CollectedMetrics);
-        not_found -> 
-            maps:put(OriginMetricName, 
-                     {MetricName, Tags0, Fields, Timestamping andalso unix_time(Precision)}, 
+        not_found ->
+            maps:put(OriginMetricName,
+                     {MetricName, Tags0, Fields, Timestamping andalso unix_time(Precision)},
                      CollectedMetrics)
     end,
     maps:size(CollectedMetrics) == 0 andalso prepare_batch_send(BatchWinSize),
@@ -341,7 +378,7 @@ subscribe(Subscribtions) when is_list(Subscribtions) ->
     [subscribe(Subscribtion) || Subscribtion <- Subscribtions];
 subscribe({Name, DataPoint, Interval, Extra}) ->
     exometer_report:subscribe(?MODULE, Name, DataPoint, Interval, Extra, false);
-subscribe(_Name) -> 
+subscribe(_Name) ->
     [].
 
 -spec get_opt(atom(), list(), any()) -> any().
@@ -427,7 +464,7 @@ flatten_tags(Tags) ->
                 end, [], lists:keysort(1, Tags)).
 
 -spec make_packet(exometer_report:metric(), map() | list(),
-                  map(), boolean() | non_neg_integer(), precision()) -> 
+                  map(), boolean() | non_neg_integer(), precision()) ->
     list().
 make_packet(Measurement, Tags, Fields, Timestamping, Precision) ->
     BinaryTags = flatten_tags(Tags),
@@ -487,7 +524,7 @@ evaluate_subscription_options(MetricId, Options, DefaultTags, DefaultSeriesName,
     TagMap = maps:from_list(NewTags),
     {FinalMetricId, TagMap}.
 
--spec evaluate_subscription_tags(list(), [{atom(), value()}]) -> 
+-spec evaluate_subscription_tags(list(), [{atom(), value()}]) ->
     {list(), [{atom(), value()}], [integer()]}.
 evaluate_subscription_tags(MetricId, TagOpts) ->
     evaluate_subscription_tags(MetricId, TagOpts, [], []).
@@ -542,4 +579,3 @@ evaluate_subscription_formatting({MetricId, Tags, FromNameIndices}, FormattingOp
                                         -> {list() | atom(), [{atom(), value()}]}.
 evaluate_subscription_series_name({MetricId, Tags}, undefined) -> {MetricId, Tags};
 evaluate_subscription_series_name({_MetricId, Tags}, SeriesName) -> {SeriesName, Tags}.
-
