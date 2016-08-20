@@ -63,7 +63,7 @@
                 port :: inet:port_number(),  % for udp
                 timestamping :: boolean(),
                 precision :: precision(),
-                collected_metrics = [] :: list(),
+                collected_metrics = [] :: measurements(),
                 batch_window_size = 0 :: integer(),
                 tags :: map(),
                 series_name :: atom(),
